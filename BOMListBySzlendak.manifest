@@ -1,0 +1,12 @@
+{
+	"autodeskProduct":	"Fusion",
+	"type":	"script",
+	"author":	"Szlendak",
+	"description":	{
+		"":	"BOM list by Szlendak"
+	},
+	"version":	"1.0.1",
+	"supportedOS":	"windows|mac",
+	"editEnabled":	false,
+	"iconFilename":	"ScriptIcon.svg"
+}
