@@ -28,12 +28,12 @@ def _get_active_design() -> adsk.fusion.Design:
     return design
 
 
-def _build_table(rows: list[tuple[str, int, str, str, str]]) -> str:
-    header = "No. | Component Name | Qty | X | Y | Z"
+def _build_table(rows: list[tuple[str, str, int, str, str, str]]) -> str:
+    header = "No. | Component Name | Material | Qty | X | Y | Z"
     separator = "-" * len(header)
     lines = [header, separator]
-    for index, (name, qty, x_size, y_size, z_size) in enumerate(rows, start=1):
-        lines.append(f"{index:>3} | {name} | {qty} | {x_size} | {y_size} | {z_size}")
+    for index, (name, material, qty, x_size, y_size, z_size) in enumerate(rows, start=1):
+        lines.append(f"{index:>3} | {name} | {material} | {qty} | {x_size} | {y_size} | {z_size}")
     return "\n".join(lines)
 
 
@@ -74,6 +74,28 @@ def _get_component_size(
         f"{size_z:.2f}",
     )
 
+
+
+
+def _get_component_material(component: adsk.fusion.Component) -> str:
+    try:
+        material = component.material
+        if material:
+            return material.name
+    except Exception:
+        pass
+
+    try:
+        bodies = component.bRepBodies
+        for index in range(bodies.count):
+            body = bodies.item(index)
+            material = body.material
+            if material:
+                return material.name
+    except Exception:
+        pass
+
+    return ""
 
 def _reorder_sizes_for_thickness(
     size_x: float, size_y: float, size_z: float, thickness_override: float | None
@@ -128,6 +150,7 @@ def _show_table(
     design: adsk.fusion.Design,
     thickness_param: adsk.fusion.Parameter | None,
     csv_path: str | None,
+    merge_enabled: bool,
 ) -> None:
     app.log("BomSzlendakv2: Building component table.")
     components = design.allComponents
@@ -149,13 +172,15 @@ def _show_table(
         token = component.entityToken
         counts[token] = counts.get(token, 0) + 1
 
-    rows: list[tuple[str, int, str, str, str]] = []
+    rows: list[tuple[str, str, int, str, str, str]] = []
     for index in range(components.count):
         component = components.item(index)
         token = component.entityToken
         qty = counts.get(token, 0)
         if component == root_component:
             qty = max(qty, 1)
+
+        material = _get_component_material(component)
 
         size_x, size_y, size_z = _get_component_size(component, units_manager)
         if size_x != "-" and thickness_override is not None:
@@ -170,7 +195,7 @@ def _show_table(
             x_val = y_val = z_val = 0.0
 
         if size_x == "-":
-            rows.append((component.name, qty, "-", "-", "-"))
+            rows.append((component.name, material, qty, "-", "-", "-"))
         else:
             x_val, y_val, z_val = _reorder_sizes_for_thickness(
                 x_val, y_val, z_val, thickness_override
@@ -178,6 +203,7 @@ def _show_table(
             rows.append(
                 (
                     component.name,
+                    material,
                     qty,
                     f"{x_val:.2f}",
                     f"{y_val:.2f}",
@@ -185,7 +211,10 @@ def _show_table(
                 )
             )
 
-    rows.sort(key=lambda value: value[0].casefold())
+    if merge_enabled:
+        rows = _merge_rows(rows)
+
+    rows.sort(key=lambda value: (value[1] == "", value[1].casefold(), value[0].casefold()))
 
     units_label = units_manager.defaultLengthUnits
     header = f"BOM list by Szlendak (units: {units_label})"
@@ -201,6 +230,41 @@ def _show_table(
         )
     else:
         ui.messageBox(f"{header}\n\n{table}", "Components in Design")
+
+
+def _merge_rows(
+    rows: list[tuple[str, str, int, str, str, str]]
+) -> list[tuple[str, str, int, str, str, str]]:
+    merged_rows: list[tuple[str, str, int, str, str, str]] = []
+    index_by_key: dict[tuple[str, str, str, str], int] = {}
+
+    for name, material, qty, x_size, y_size, z_size in rows:
+        if x_size == "-" or y_size == "-" or z_size == "-":
+            merged_rows.append((name, material, qty, x_size, y_size, z_size))
+            continue
+
+        key = (material, x_size, y_size, z_size)
+        existing_index = index_by_key.get(key)
+        if existing_index is None:
+            index_by_key[key] = len(merged_rows)
+            merged_rows.append((name, material, qty, x_size, y_size, z_size))
+            continue
+
+        existing = merged_rows[existing_index]
+        existing_name, existing_material, existing_qty, ex_x, ex_y, ex_z = existing
+        new_qty = existing_qty + qty
+        if "(merged)" not in existing_name:
+            existing_name = f"{existing_name} (merged)"
+        merged_rows[existing_index] = (
+            existing_name,
+            existing_material,
+            new_qty,
+            ex_x,
+            ex_y,
+            ex_z,
+        )
+
+    return merged_rows
 
 
 def _format_export_datetime() -> str:
@@ -323,8 +387,15 @@ def _get_saved_export_enabled() -> bool:
     return True
 
 
+def _get_saved_merge_enabled() -> bool:
+    value = _load_config().get("merge_same_size_enabled")
+    if isinstance(value, bool):
+        return value
+    return False
+
+
 def _export_csv(
-    rows: list[tuple[str, int, str, str, str]],
+    rows: list[tuple[str, str, int, str, str, str]],
     units_label: str,
     project_name: str,
     export_dt: str,
@@ -342,9 +413,9 @@ def _export_csv(
             ]
         )
         writer.writerow([])
-        writer.writerow(["No.", "Component Name", "Qty", "X", "Y", "Z"])
-        for index, (name, qty, x_size, y_size, z_size) in enumerate(rows, start=1):
-            writer.writerow([index, name, qty, x_size, y_size, z_size])
+        writer.writerow(["No.", "Component Name", "Material", "Qty", "X", "Y", "Z"])
+        for index, (name, material, qty, x_size, y_size, z_size) in enumerate(rows, start=1):
+            writer.writerow([index, name, material, qty, x_size, y_size, z_size])
 
     return path
 
@@ -416,6 +487,14 @@ def run(_context: str):
                         "",
                         False,
                     )
+                    merge_enabled = _get_saved_merge_enabled()
+                    merge_checkbox = inputs.addBoolValueInput(
+                        "mergeSameSize",
+                        "Merge same size",
+                        True,
+                        "",
+                        merge_enabled,
+                    )
                     csv_path_input.isEnabled = export_checkbox.value
                     browse_input.isEnabled = export_checkbox.value
 
@@ -431,6 +510,11 @@ def run(_context: str):
                                     browse_input.isEnabled = export_checkbox.value
                                     _save_config(
                                         {"export_csv_enabled": export_checkbox.value}
+                                    )
+                                    return
+                                if changed.id == "mergeSameSize":
+                                    _save_config(
+                                        {"merge_same_size_enabled": merge_checkbox.value}
                                     )
                                     return
                                 if changed.id != "browseCsv":
@@ -467,7 +551,7 @@ def run(_context: str):
                                         )
                                     if csv_path:
                                         _remember_csv_dir(csv_path)
-                                _show_table(design, param, csv_path)
+                                _show_table(design, param, csv_path, merge_checkbox.value)
                                 adsk.autoTerminate(True)
                             except Exception:
                                 app.log(f"Failed:\n{traceback.format_exc()}")

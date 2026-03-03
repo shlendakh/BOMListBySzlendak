@@ -1,3 +1,5 @@
 {
-  "export_csv_enabled": true
+  "export_csv_enabled": true,
+  "last_csv_dir": "/Users/pawelszlendak/Downloads",
+  "merge_same_size_enabled": true
 }
